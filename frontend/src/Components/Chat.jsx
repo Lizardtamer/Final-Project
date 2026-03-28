@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Container, Card, Form, Button, ListGroup } from 'react-bootstrap';
 import './Chat.css';
 
@@ -7,18 +7,40 @@ const Chat = () => {
     { sender: 'bot', text: 'Hello! I\'m your Memphis Booking Assistant. I can help you:\n\n1. Add a new local artist to the database\n2. Get booking recommendations for a touring artist\n\nWhat would you like to do? (Type "add" or "recommend")' }
   ]);
   const [input, setInput] = useState('');
-  const [step, setStep] = useState('choose'); // 'choose', 'name', 'genre', 'confirm', 'done', 'rec-genre', 'rec-done'
+  const [step, setStep] = useState('choose'); // 'choose', 'name', 'genre', 'confirm', 'done', 'rec-chat'
   const [artistData, setArtistData] = useState({ name: '', genre: '' });
   const [isLoading, setIsLoading] = useState(false);
+  const [chatSessionId, setChatSessionId] = useState(null);
+  const [backendOnline, setBackendOnline] = useState(true);
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
+  useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        const response = await fetch('http://127.0.0.1:8001/health');
+        if (response.ok) {
+          setBackendOnline(true);
+          return;
+        }
+      } catch {
+        setBackendOnline(false);
+      }
 
-    // Add user message
-    const userMessage = { sender: 'user', text: input };
+      setBackendOnline(false);
+      setMessages(prev => [...prev, {
+        sender: 'bot',
+        text: 'Backend appears to be offline right now. Start the API at http://127.0.0.1:8001, then try again.'
+      }]);
+    };
+
+    checkHealth();
+  }, []);
+
+  const handleSend = async (chipText = null) => {
+    const userInput = chipText !== null ? chipText : input;
+    if (!userInput.trim()) return;
+
+    const userMessage = { sender: 'user', text: userInput };
     setMessages(prev => [...prev, userMessage]);
-
-    const userInput = input;
     setInput('');
 
     // Process based on current step
@@ -32,60 +54,74 @@ const Chat = () => {
       } else if (userInput.toLowerCase().includes('rec') || userInput.toLowerCase().includes('recommend')) {
         setMessages(prev => [...prev, { 
           sender: 'bot', 
-          text: 'Perfect! What genre(s) does the touring artist perform? (e.g., "Indie, Rock, Alternative")' 
+          text: 'Perfect! Tell me what you\'re looking for (artist, genres, vibe, constraints).\n\nType "back" to return to the main menu or "reset" to clear chat context.' 
         }]);
-        setStep('rec-genre');
+        setStep('rec-chat');
       } else {
         setMessages(prev => [...prev, { 
           sender: 'bot', 
           text: 'I didn\'t understand that. Please type "add" to add an artist or "recommend" to get booking recommendations.' 
         }]);
       }
-    } else if (step === 'rec-genre') {
+    } else if (step === 'rec-chat') {
+      if (userInput.toLowerCase() === 'back') {
+        setMessages(prev => [...prev, {
+          sender: 'bot',
+          text: 'Back to main menu. Type "add" or "recommend".'
+        }]);
+        setStep('choose');
+        return;
+      }
+
+      const shouldReset = userInput.toLowerCase() === 'reset';
       setIsLoading(true);
       try {
-        const response = await fetch(`http://127.0.0.1:8000/recommend?touring_genres=${encodeURIComponent(userInput)}`);
+        const response = await fetch('http://127.0.0.1:8001/chat_recommend', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            message: shouldReset ? 'Start a fresh recommendation chat.' : userInput,
+            session_id: chatSessionId,
+            reset_session: shouldReset,
+            top_k: 7,
+            candidate_pool: 15,
+          })
+        });
         const data = await response.json();
 
         if (response.ok) {
-          let recText = `Here are the top 7 local Memphis artists that match "${userInput}":\n\n`;
-          data.recommendations.forEach((rec, idx) => {
-            recText += `${idx + 1}. ${rec.artist}\n   Genre: ${rec.genre}\n   Match Score: ${(rec.match_score * 100).toFixed(1)}%\n\n`;
+          setChatSessionId(data.session_id || null);
+          const result = data.result || {};
+          const recs = result.recommendations || [];
+
+          let recText = `${data.message}\n\n`;
+          recs.forEach((rec, idx) => {
+            recText += `${idx + 1}. ${rec.artist}\n   Genre: ${rec.genre}\n   Why: ${rec.reason}\n\n`;
           });
-          recText += 'Would you like another recommendation? (yes/no)';
+
+          if (result.source === 'local') {
+            recText += 'Note: This turn used local ranking fallback.';
+          }
           
           setMessages(prev => [...prev, { 
             sender: 'bot', 
             text: recText 
           }]);
-          setStep('rec-done');
         } else {
           setMessages(prev => [...prev, { 
             sender: 'bot', 
             text: `Sorry, there was an error: ${data.detail}` 
           }]);
         }
-      } catch (error) {
+      } catch {
         setMessages(prev => [...prev, { 
           sender: 'bot', 
-          text: `Error connecting to the server. Make sure the backend is running on http://127.0.0.1:8000` 
+            text: `Error connecting to the server. Make sure the backend is running on http://127.0.0.1:8001` 
         }]);
       }
       setIsLoading(false);
-    } else if (step === 'rec-done') {
-      if (userInput.toLowerCase().includes('yes') || userInput.toLowerCase().includes('y')) {
-        setMessages(prev => [...prev, { 
-          sender: 'bot', 
-          text: 'What genre(s) does the touring artist perform?' 
-        }]);
-        setStep('rec-genre');
-      } else {
-        setMessages(prev => [...prev, { 
-          sender: 'bot', 
-          text: 'Would you like to add an artist or get more recommendations? (Type "add" or "recommend", or "quit" to exit)' 
-        }]);
-        setStep('choose');
-      }
     } else if (step === 'name') {
       setArtistData(prev => ({ ...prev, name: userInput }));
       setMessages(prev => [...prev, { 
@@ -104,7 +140,7 @@ const Chat = () => {
       if (userInput.toLowerCase().includes('yes') || userInput.toLowerCase().includes('y')) {
         setIsLoading(true);
         try {
-          const response = await fetch('http://127.0.0.1:8000/add_artist', {
+          const response = await fetch('http://127.0.0.1:8001/add_artist', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -129,10 +165,10 @@ const Chat = () => {
               text: `Sorry, there was an error: ${data.detail}` 
             }]);
           }
-        } catch (error) {
+        } catch {
           setMessages(prev => [...prev, { 
             sender: 'bot', 
-            text: `Error connecting to the server. Make sure the backend is running on http://127.0.0.1:8000` 
+            text: `Error connecting to the server. Make sure the backend is running on http://127.0.0.1:8001` 
           }]);
         }
         setIsLoading(false);
@@ -167,48 +203,83 @@ const Chat = () => {
     }
   };
 
+  const handleReset = () => {
+    setMessages([{
+      sender: 'bot',
+      text: 'Hello! I\'m your Memphis Booking Assistant. I can help you:\n\n1. Add a new local artist to the database\n2. Get booking recommendations for a touring artist\n\nWhat would you like to do? (Type "add" or "recommend")'
+    }]);
+    setStep('choose');
+    setChatSessionId(null);
+    setArtistData({ name: '', genre: '' });
+    setInput('');
+  };
+
   return (
-    <Container className="my-4">
-      <Card>
-        <Card.Header className="bg-primary text-white">
-          <h4 className="mb-0">Memphis Booking Assistant</h4>
-        </Card.Header>
-        <Card.Body style={{ height: '500px', overflowY: 'auto' }}>
-          <ListGroup variant="flush">
-            {messages.map((msg, index) => (
-              <ListGroup.Item 
-                key={index} 
-                className={`border-0 ${msg.sender === 'user' ? 'text-end' : ''}`}
+    <div className="chat-page">
+      <Container>
+        <Card className="chat-card">
+          <Card.Header className="chat-card-header">
+            <div>
+              <h4 className="chat-header-title">Book.AI</h4>
+              <p className="chat-header-subtitle">Find strong local openers for your touring act</p>
+            </div>
+            <span className="chat-status-pill">
+              <span className={`chat-status-dot ${backendOnline ? 'online' : 'offline'}`} />
+              {backendOnline ? 'Online' : 'Offline'}
+            </span>
+          </Card.Header>
+          <div className="chat-chips">
+            <button className="chat-chip" onClick={() => handleSend('add')} disabled={isLoading || !backendOnline}>
+              + Add artist
+            </button>
+            <button className="chat-chip" onClick={() => handleSend('recommend')} disabled={isLoading || !backendOnline}>
+              Get recommendations
+            </button>
+            <button className="chat-chip" onClick={handleReset}>
+              Reset chat
+            </button>
+          </div>
+          <Card.Body className="chat-card-body">
+            <ListGroup variant="flush" className="message-list">
+              {messages.map((msg, index) => (
+                <ListGroup.Item
+                  key={index}
+                  className={`border-0 ${msg.sender === 'user' ? 'text-end' : ''}`}
+                >
+                  <div className={`chat-message ${msg.sender === 'user' ? 'd-flex flex-column align-items-end' : ''}`}>
+                    <div className="bubble-label">{msg.sender === 'user' ? 'You' : 'Assistant'}</div>
+                    <div className={`bubble ${msg.sender === 'user' ? 'bubble-user' : 'bubble-bot'}`}>
+                      {msg.text}
+                    </div>
+                  </div>
+                </ListGroup.Item>
+              ))}
+            </ListGroup>
+          </Card.Body>
+          <Card.Footer className="chat-card-footer">
+            <Form.Group className="d-flex gap-2">
+              <Form.Control
+                className="chat-input"
+                type="text"
+                placeholder="Describe an artist, genre, or vibe…"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={handleKeyPress}
+                disabled={isLoading || !backendOnline}
+              />
+              <Button
+                className="chat-send-btn"
+                variant="primary"
+                onClick={() => handleSend()}
+                disabled={isLoading || !input.trim() || !backendOnline}
               >
-                <div className={`d-inline-block p-2 rounded ${msg.sender === 'user' ? 'bg-primary text-white' : 'bg-light'}`} style={{ maxWidth: '70%' }}>
-                  <small className="fw-bold d-block">{msg.sender === 'user' ? 'You' : 'Bot'}</small>
-                  <div style={{ whiteSpace: 'pre-line' }}>{msg.text}</div>
-                </div>
-              </ListGroup.Item>
-            ))}
-          </ListGroup>
-        </Card.Body>
-        <Card.Footer>
-          <Form.Group className="d-flex gap-2">
-            <Form.Control
-              type="text"
-              placeholder="Type your message..."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-              disabled={isLoading}
-            />
-            <Button 
-              variant="primary" 
-              onClick={handleSend}
-              disabled={isLoading || !input.trim()}
-            >
-              {isLoading ? 'Sending...' : 'Send'}
-            </Button>
-          </Form.Group>
-        </Card.Footer>
-      </Card>
-    </Container>
+                {isLoading ? 'Sending…' : 'Send'}
+              </Button>
+            </Form.Group>
+          </Card.Footer>
+        </Card>
+      </Container>
+    </div>
   );
 };
 

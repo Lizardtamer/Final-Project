@@ -3,3 +3,5 @@ uvicorn[standard]>=0.32.0
 pydantic>=2.10.0
 pandas
 scikit-learn
+google-genai
+python-dotenv
